@@ -1,0 +1,18 @@
+{
+  "name": "f1tv-downloader",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Telechargement de sessions F1TV (essais, qualifications, course...) en local",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "mysql2": "^3.11.0"
+  }
+}
