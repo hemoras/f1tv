@@ -8,21 +8,25 @@ import { UserError } from './errors.js';
 import { loadCookieHeader } from './cookies.js';
 import { createPool, getF1tvSaisonId, getGrandPrix, getManches } from './db.js';
 import { F1TV_HOST, findGpPageId, findSessionContentId, findAllSessions, getVideoUrl } from './f1tvApi.js';
-import { getVideoAndAudioTracks } from './hls.js';
+import { getVideoAndAudioTracks, filterAudioTracks } from './hls.js';
 import { buildFileName } from './filename.js';
 import { downloadAndMux } from './download.js';
+import { getChannelId } from './fluxMapping.js';
 
 function printUsage() {
   console.log(
     [
       'Usage :',
-      '  node src/index.js -saison <annee> [-manche <numero>|all] [-session "<nom de la session>"]',
+      '  node src/index.js -saison <annee> [-manche <numero>|all] [-session "<nom de la session>"] [-audio <code>|no]',
       '',
       'Exemples :',
-      '  node src/index.js -saison 2026 -manche 11 -session "Essais Libres 1"   (telecharge cette video)',
+      '  node src/index.js -saison 2026 -manche 11 -session "Essais Libres 1"   (telecharge cette video, toutes les pistes audio)',
       '  node src/index.js -saison 2026 -manche 11                              (liste les sessions dispo pour la manche 11, sans telecharger)',
       '  node src/index.js -saison 2026 -manche all -session "Course"           (telecharge la course de chaque manche de la saison)',
       '  node src/index.js -saison 2026                                        (liste les sessions dispo pour toute la saison, sans telecharger)',
+      '  node src/index.js -saison 2026 -manche 11 -session "Course" -audio en  (uniquement la piste audio anglaise)',
+      '  node src/index.js -saison 2026 -manche 11 -session "Course" -audio no  (video seule, sans aucune piste audio)',
+      '  node src/index.js -saison 2026 -manche 11 -session "Course" -flux "Live Timing"  (autre angle/flux)',
     ].join('\n')
   );
 }
@@ -38,6 +42,8 @@ function parseCliArgs(argv) {
       saison: { type: 'string' },
       manche: { type: 'string' },
       session: { type: 'string' },
+      audio: { type: 'string' },
+      flux: { type: 'string' },
     },
     strict: false,
   });
@@ -62,23 +68,41 @@ async function resolveManches(pool, saison, args) {
 
 /**
  * Telecharge une session precise (video + toutes les pistes audio) et
- * l'assemble en .mkv.
+ * l'assemble en .mkv. Ne fait rien (et ne contacte pas F1TV) si le fichier
+ * final existe deja : permet de rejouer une commande (ex : saison complete
+ * sans -manche) sans retelecharger ce qui est deja present.
  */
-async function downloadSession({ config, cookieHeader, saison, manche, grandPrix, sessionInfo }) {
+async function downloadSession({ config, cookieHeader, saison, manche, grandPrix, sessionInfo, audioArg, flux, channelId }) {
   const { session, contentId } = sessionInfo;
 
-  logger.info(`Recuperation du lien de la video pour "${session}"...`);
-  const masterPlaylistUrl = await getVideoUrl(cookieHeader, contentId);
-
-  logger.info('Analyse des pistes disponibles...');
-  const { video, audioTracks } = await getVideoAndAudioTracks(masterPlaylistUrl);
-  logger.info(`${audioTracks.length} piste(s) audio disponible(s) : ${audioTracks.map((t) => t.name).join(', ')}`);
-
-  const fileName = buildFileName({ manche, grandPrix, saison, session });
+  const fileName = buildFileName({ manche, grandPrix, saison, session, flux });
   const destinationPath = path.resolve(config.destDir, fileName);
 
   if (existsSync(destinationPath)) {
-    logger.warn(`Le fichier "${fileName}" existe deja, il va etre remplace.`);
+    logger.info(`Deja telecharge, ignore : "${fileName}"`);
+    return { skipped: true };
+  }
+
+  logger.info(
+    flux
+      ? `Recuperation du lien de la video pour "${session}" (flux "${flux}")...`
+      : `Recuperation du lien de la video pour "${session}"...`
+  );
+  const masterPlaylistUrl = await getVideoUrl(cookieHeader, contentId, channelId);
+
+  logger.info('Analyse des pistes disponibles...');
+  const { video, audioTracks: allAudioTracks } = await getVideoAndAudioTracks(masterPlaylistUrl);
+  logger.info(
+    `${allAudioTracks.length} piste(s) audio disponible(s) : ${allAudioTracks.map((t) => t.name).join(', ')}`
+  );
+
+  const audioTracks = filterAudioTracks(allAudioTracks, audioArg);
+  if (audioArg) {
+    logger.info(
+      audioTracks.length > 0
+        ? `Piste(s) audio retenue(s) (-audio ${audioArg}) : ${audioTracks.map((t) => t.name).join(', ')}`
+        : 'Aucune piste audio ne sera telechargee (-audio no).'
+    );
   }
 
   logger.info(`Telechargement vers "${fileName}"...`);
@@ -90,6 +114,7 @@ async function downloadSession({ config, cookieHeader, saison, manche, grandPrix
   });
 
   logger.success(`Video telechargee avec succes : ${fileName}`);
+  return { skipped: false };
 }
 
 async function main() {
@@ -104,6 +129,11 @@ async function main() {
   if (!Number.isInteger(saison)) {
     throw new UserError('Le parametre -saison doit etre un nombre entier.');
   }
+
+  // -flux (autre angle/camera) : valide des le depart pour echouer immediatement
+  // si le nom donne n'est pas reconnu, plutot que de le decouvrir manche apres manche.
+  const flux = args.flux ? String(args.flux) : null;
+  const channelId = flux ? getChannelId(flux) : '';
 
   const config = loadConfig();
   const pool = createPool(config.db);
@@ -127,6 +157,7 @@ async function main() {
     const session = isListingMode ? null : String(args.session);
 
     let successCount = 0;
+    let skippedCount = 0;
     let failureCount = 0;
 
     for (const manche of manches) {
@@ -134,22 +165,60 @@ async function main() {
         const grandPrix = await getGrandPrix(pool, saison, manche);
         logger.info(`--- Manche ${manche} : ${grandPrix} ---`);
 
-        const { pageId: gpPageId, meetingKey } = await findGpPageId(cookieHeader, f1tvSaisonId, manche);
+        const { pageId: gpPageId, meetingKey, directSessions } = await findGpPageId(cookieHeader, f1tvSaisonId, manche);
 
+        // Sur les saisons anciennes, il n'y a pas de page dediee par Grand Prix :
+        // la page saison contient deja directement les videos disponibles
+        // (replay, resume...), sans page a interroger separement.
         if (isListingMode) {
-          const sessions = await findAllSessions(cookieHeader, gpPageId, meetingKey);
-          logger.info(`${sessions.length} session(s) disponible(s) pour "${grandPrix}" :`);
-          for (const sessionInfo of sessions) {
-            logger.info(`  - ${sessionInfo.session}`);
+          if (directSessions) {
+            logger.info(
+              `${directSessions.length} session(s) disponible(s) pour "${grandPrix}" (pas de page dediee sur cette saison) :`
+            );
+            for (const sessionInfo of directSessions) {
+              logger.info(`  - ${sessionInfo.session}`);
+            }
+          } else {
+            const sessions = await findAllSessions(cookieHeader, gpPageId, meetingKey);
+            logger.info(`${sessions.length} session(s) disponible(s) pour "${grandPrix}" :`);
+            for (const sessionInfo of sessions) {
+              logger.info(`  - ${sessionInfo.session}`);
+            }
           }
           continue;
         }
 
-        const contentId = await findSessionContentId(cookieHeader, gpPageId, meetingKey, session);
+        let contentId;
+        if (directSessions) {
+          const found = directSessions.find((s) => s.session === session);
+          if (!found) {
+            const available = directSessions.map((s) => s.session).join(', ');
+            throw new UserError(
+              `Session "${session}" introuvable pour cette manche sur cette saison. Sessions disponibles : ${available}.`
+            );
+          }
+          contentId = found.contentId;
+        } else {
+          contentId = await findSessionContentId(cookieHeader, gpPageId, meetingKey, session);
+        }
 
         try {
-          await downloadSession({ config, cookieHeader, saison, manche, grandPrix, sessionInfo: { session, contentId } });
-          successCount += 1;
+          const result = await downloadSession({
+            config,
+            cookieHeader,
+            saison,
+            manche,
+            grandPrix,
+            sessionInfo: { session, contentId },
+            audioArg: args.audio,
+            flux,
+            channelId,
+          });
+          if (result.skipped) {
+            skippedCount += 1;
+          } else {
+            successCount += 1;
+          }
         } catch (err) {
           failureCount += 1;
           if (err instanceof UserError) {
@@ -171,10 +240,13 @@ async function main() {
     }
 
     if (!isListingMode) {
-      if (successCount + failureCount > 1) {
-        logger.info(`Termine : ${successCount} video(s) telechargee(s), ${failureCount} echec(s).`);
+      if (successCount + skippedCount + failureCount > 1) {
+        logger.info(
+          `Termine : ${successCount} video(s) telechargee(s), ${skippedCount} deja presente(s) (ignoree(s)), ${failureCount} echec(s).`
+        );
       }
-      if (successCount === 0) {
+      // Erreur uniquement si rien n'a abouti du tout (ni telechargement, ni fichier deja present).
+      if (failureCount > 0 && successCount === 0 && skippedCount === 0) {
         process.exitCode = 1;
       }
     }

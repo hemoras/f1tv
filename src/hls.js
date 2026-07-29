@@ -106,3 +106,26 @@ export async function getVideoAndAudioTracks(masterPlaylistUrl) {
 
   return { video: bestVideo, audioTracks: uniqueAudioTracks };
 }
+
+/**
+ * Filtre les pistes audio selon le parametre -audio :
+ * - absent : toutes les pistes sont conservees.
+ * - "no" (insensible a la casse) : aucune piste (video seule).
+ * - un code langue (ex "en") : uniquement la piste dont track.language correspond.
+ */
+export function filterAudioTracks(audioTracks, audioArg) {
+  if (!audioArg) return audioTracks;
+
+  const normalized = audioArg.trim().toLowerCase();
+  if (normalized === 'no') return [];
+
+  const filtered = audioTracks.filter((track) => (track.language || '').toLowerCase() === normalized);
+  if (filtered.length === 0) {
+    const available = audioTracks.map((track) => track.language || '?').join(', ');
+    throw new UserError(
+      `Aucune piste audio avec la langue "${audioArg}" trouvee. Langues disponibles : ${available}.`
+    );
+  }
+
+  return filtered;
+}

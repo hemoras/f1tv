@@ -122,9 +122,9 @@ async function mapWithConcurrency(items, limit, worker) {
 function normalizeLanguageCode(language) {
   if (!language) return 'und';
   const code = language.trim().toLowerCase();
-  // "fx" est un code interne F1TV (flux sans commentaire / son d'ambiance),
-  // pas un code de langue ISO 639 valide : mkvmerge le rejette sinon.
-  if (code === 'fx') return 'und';
+  // "fx" et "cfx" sont des codes internes F1TV (flux sans commentaire / son
+  // d'ambiance), pas des codes de langue ISO 639 valides : mkvmerge les rejette sinon.
+  if (code === 'fx' || code === 'cfx') return 'und';
   return code;
 }
 
@@ -204,11 +204,15 @@ export async function downloadAndMux({ videoUrl, audioTracks, destinationPath, m
     await downloadStream(videoUrl, videoFile, 'Video');
 
     const parallelCount = Math.min(maxParallelAudio, audioTracks.length);
-    logger.info(
-      audioTracks.length > 1
-        ? `Telechargement de ${audioTracks.length} pistes audio (${parallelCount} en parallele)...`
-        : 'Telechargement de la piste audio...'
-    );
+    if (audioTracks.length === 0) {
+      logger.info('Aucune piste audio a telecharger (video seule).');
+    } else {
+      logger.info(
+        audioTracks.length > 1
+          ? `Telechargement de ${audioTracks.length} pistes audio (${parallelCount} en parallele)...`
+          : 'Telechargement de la piste audio...'
+      );
+    }
 
     const audioFiles = await mapWithConcurrency(audioTracks, maxParallelAudio, async (track, index) => {
       const audioFile = path.join(tempDir, `audio_${index}.m4a`);

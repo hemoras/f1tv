@@ -1,5 +1,6 @@
 import { UserError } from './errors.js';
 import { extractCookieValue, extractSubscriptionToken } from './cookies.js';
+import { mapSessionName } from './sessionNameMapping.js';
 
 export const F1TV_HOST = 'f1tv.formula1.com';
 const BASE_URL = `https://${F1TV_HOST}`;
@@ -100,39 +101,110 @@ function findAllMatches(node, predicate, results = []) {
   return results;
 }
 
+function isUsable(value) {
+  return value !== undefined && value !== null && String(value).trim() !== '';
+}
+
 /**
- * Recupere le PageID F1TV du Grand Prix correspondant a une manche donnee,
- * a partir de la page "saison" (Championship_Meeting_Ordinal -> PageID).
- * Renvoie aussi le MeetingKey de ce Grand Prix : les pages F1TV listent parfois
- * des sessions archivees d'autres annees portant le meme titre (ex : plusieurs
- * "Course" pour differentes editions au meme circuit), le MeetingKey permet de
- * ne garder que celles de la manche demandee.
+ * Recupere les informations du Grand Prix correspondant a une manche donnee,
+ * a partir de la page "saison". Deux cas de figure existent selon la saison :
+ *
+ * - Saisons recentes : chaque manche est representee par une entree avec un
+ *   PageID (Championship_Meeting_Ordinal -> PageID), qui pointe vers une page
+ *   dediee au Grand Prix listant toutes ses sessions (FP1, Qualifs, Course...).
+ * - Saisons anciennes : il n'y a pas de PageID du tout (Championship_Meeting_Ordinal
+ *   est aussi vide) ; la page saison liste directement les videos disponibles
+ *   pour la manche (en general plusieurs : le replay complet et le resume),
+ *   sans page dediee. On renvoie alors directSessions avec ces videos ; le nom
+ *   de session est tire de contentSubtype (REPLAY, HIGHLIGHTS...) plutot que de
+ *   titleBrief (specifique a chaque GP, inutilisable comme identifiant generique),
+ *   puis passe par mapSessionName() (REPLAY -> Course, HIGHLIGHTS -> Resume, ...).
+ *
+ * Pour identifier la manche, on utilise en priorite Championship_Meeting_Ordinal
+ * (uniquement parmi les entrees ou il est effectivement renseigne : certaines
+ * entrees, comme les essais de pre-saison, ont un Meeting_Number renseigne mais
+ * un Championship_Meeting_Ordinal vide, il ne faut pas les laisser "masquer" le
+ * vrai Grand Prix qui, lui, a un ordinal correct). Seulement si AUCUNE entree de
+ * la reponse n'a d'ordinal utilisable (vieilles saisons), on se rabat sur
+ * Meeting_Number ; en tout dernier recours, sur session_index.
  */
 export async function findGpPageId(cookieHeader, f1tvSaisonId, manche) {
-  const data = await callF1tvApi(`/2.0/R/FRA/WEB_DASH/ALL/PAGE/${f1tvSaisonId}/ACCESS/5`, cookieHeader);
+  const url = `/2.0/R/FRA/WEB_DASH/ALL/PAGE/${f1tvSaisonId}/ACCESS/5`;
+  const data = await callF1tvApi(url, cookieHeader);
 
-  const match = findFirstMatch(
-    data?.resultObj,
-    (node) =>
-      node.Championship_Meeting_Ordinal !== undefined &&
-      String(node.Championship_Meeting_Ordinal) === String(manche) &&
-      node.PageID !== undefined
-  );
+  const candidates = findAllMatches(data?.resultObj, (node) => {
+    const emfAttributes = node.metadata?.emfAttributes;
+    if (!emfAttributes) return false;
+    const hasPageId = emfAttributes.PageID !== undefined && emfAttributes.PageID !== null;
+    const hasDirectContent = node.metadata.contentId !== undefined;
+    return hasPageId || hasDirectContent;
+  });
 
-  if (!match) {
+  function matchOn(fieldName) {
+    return candidates.filter((node) => {
+      const value = node.metadata.emfAttributes[fieldName];
+      return isUsable(value) && String(value) === String(manche);
+    });
+  }
+
+  let matches = matchOn('Championship_Meeting_Ordinal');
+  if (matches.length === 0) {
+    // Aucune entree n'a d'ordinal utilisable pour cette manche : soit la saison
+    // n'utilise pas ce champ du tout (vieilles saisons), soit la manche demandee
+    // n'existe pas. On retente avec Meeting_Number, uniquement si vraiment aucune
+    // entree de la reponse n'a d'ordinal renseigne (sinon on risquerait de
+    // confondre une manche reelle avec un evenement hors championnat).
+    const anyOrdinalUsable = candidates.some((node) => isUsable(node.metadata.emfAttributes.Championship_Meeting_Ordinal));
+    if (!anyOrdinalUsable) {
+      matches = matchOn('Meeting_Number');
+      if (matches.length === 0) {
+        matches = matchOn('session_index');
+      }
+    }
+  }
+
+  if (matches.length === 0) {
     throw new UserError(
       `Impossible de trouver le Grand Prix correspondant a la manche ${manche} sur la page F1TV de la saison. ` +
         `Verifie que le numero de manche est correct.`
     );
   }
 
-  return { pageId: match.PageID, meetingKey: match.MeetingKey ?? null };
+  // Certaines entrees promotionnelles (ex : bandeau "hero" d'un GP a venir)
+  // partagent le meme Championship_Meeting_Ordinal que la vraie entree du GP
+  // mais n'ont pas de PageID exploitable : on privilegie toute entree ayant
+  // un PageID valide plutot que de prendre la premiere trouvee au hasard.
+  const hasValidPageId = (node) =>
+    node.metadata.emfAttributes.PageID !== undefined && node.metadata.emfAttributes.PageID !== null;
+  matches = [...matches.filter(hasValidPageId), ...matches.filter((node) => !hasValidPageId(node))];
+
+  const first = matches[0];
+  const firstEmfAttributes = first.metadata.emfAttributes;
+  const meetingKey = firstEmfAttributes.MeetingKey ?? null;
+  const hasPageId = firstEmfAttributes.PageID !== undefined && firstEmfAttributes.PageID !== null;
+
+  if (hasPageId) {
+    return { pageId: firstEmfAttributes.PageID, meetingKey, directSessions: null };
+  }
+
+  // Pas de page dediee (saisons anciennes) : la page saison contient deja
+  // directement la ou les video(s) de la manche (replay, resume...).
+  const seenContentSubtypes = new Set();
+  const directSessions = [];
+  for (const node of matches) {
+    const rawName = node.metadata.contentSubtype || node.metadata.titleBrief;
+    if (!rawName || seenContentSubtypes.has(rawName)) continue;
+    seenContentSubtypes.add(rawName);
+    directSessions.push({ session: mapSessionName(rawName), contentId: node.metadata.contentId });
+  }
+
+  return { pageId: null, meetingKey, directSessions };
 }
 
 /**
  * Recupere le contentId de la session recherchee sur la page du Grand Prix
- * (metadata.titleBrief + metadata.emfAttributes.Series === "FORMULA 1", et
- * MeetingKey correspondant a la manche demandee si connu).
+ * (metadata.titleBrief, passe par mapSessionName(), + metadata.emfAttributes.Series
+ * === "FORMULA 1", et MeetingKey correspondant a la manche demandee si connu).
  * S'il y a plusieurs resultats, seul le premier est conserve.
  */
 export async function findSessionContentId(cookieHeader, gpPageId, meetingKey, session) {
@@ -142,7 +214,7 @@ export async function findSessionContentId(cookieHeader, gpPageId, meetingKey, s
     const metadata = node.metadata;
     return (
       metadata &&
-      metadata.titleBrief === session &&
+      mapSessionName(metadata.titleBrief) === session &&
       metadata.emfAttributes &&
       metadata.emfAttributes.Series === 'FORMULA 1' &&
       (!meetingKey || metadata.emfAttributes.MeetingKey === meetingKey) &&
@@ -195,7 +267,7 @@ export async function findAllSessions(cookieHeader, gpPageId, meetingKey) {
     const sessionIndexRaw = Array.isArray(node.properties) ? node.properties[0]?.session_index : undefined;
     const sessionIndex = typeof sessionIndexRaw === 'number' ? sessionIndexRaw : null;
 
-    sessions.push({ session: title, contentId: node.metadata.contentId, sessionIndex });
+    sessions.push({ session: mapSessionName(title), contentId: node.metadata.contentId, sessionIndex });
   }
 
   if (sessions.length === 0) {
@@ -211,8 +283,10 @@ export async function findAllSessions(cookieHeader, gpPageId, meetingKey) {
 
 /**
  * Recupere l'URL de lecture de la video (flux HLS) pour un contentId donne.
+ * channelId permet de choisir un autre angle/flux (ex : "Live Timing",
+ * "F1 Live") ; laisse vide, on recupere le flux principal.
  */
-export async function getVideoUrl(cookieHeader, contentId) {
+export async function getVideoUrl(cookieHeader, contentId, channelId = '') {
   // Cet appel exige plusieurs elements en plus du cookie, sans quoi F1TV renvoie
   // soit "Missing parameter Ascendon Token or Entitlement Token", soit
   // "Failed to evaluate stream rule" :
@@ -238,7 +312,7 @@ export async function getVideoUrl(cookieHeader, contentId) {
   }
 
   const data = await callF1tvApi(
-    `/3.0/R/FRA/WEB_HLS/ALL/CONTENT/PLAY?channelId=&contentId=${contentId}&player=player_bm`,
+    `/3.0/R/FRA/WEB_HLS/ALL/CONTENT/PLAY?channelId=${channelId}&contentId=${contentId}&player=player_bm`,
     cookieHeader,
     {
       Entitlementtoken: entitlementToken,
