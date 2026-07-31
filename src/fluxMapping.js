@@ -8,7 +8,7 @@ import { UserError } from './errors.js';
  */
 export const FLUX_CHANNEL_MAPPING = {
   'Live Timing': '1004',
-  'Drivers Tracker': '1004',
+  'Drivers Tracker': '1003',
   'F1 Live': '1033',
 };
 
