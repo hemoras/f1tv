@@ -26,11 +26,11 @@ Puis completer `.env` :
 ## Utilisation
 
 ```
-node src/index.js -saison <annee> [-manche <numero>|all] [-session "<nom de la session>"] [-audio <code>|no] [-flux "<nom du flux>"]
+node src/index.js -saison <annee> [-manche <numero>|<numero>+|all] [-session "<nom de la session>"] [-audio <code>|no] [-flux "<nom du flux>"]
 ```
 
 - `-saison` : annee de la saison (ex : 2026) — obligatoire.
-- `-manche` : numero de la manche / du Grand Prix (ex : 11). Omis ou `all` : toutes les manches de la saison sont traitees (table `statsf1_grand_prix`).
+- `-manche` : numero de la manche / du Grand Prix (ex : 11). Omis ou `all` : toutes les manches de la saison sont traitees (table `statsf1_grand_prix`). Suffixe `+` (ex : `9+`) : la manche indiquee et toutes les suivantes de la saison.
 - `-session` : nom de la session tel qu'affiche par le script (ex : "Essais Libres 1", "Qualifications", "Course", "Pre-Race"...). Omis : le script affiche la liste des sessions disponibles pour la ou les manches, **sans rien telecharger**.
 - `-audio` : optionnel. Un code langue (ex : `en`, `fr`) pour ne garder que cette piste audio ; `no` pour ne telecharger aucune piste audio (video seule). Omis : toutes les pistes audio disponibles sont incluses. Le fichier reste un `.mkv` dans tous les cas.
 - `-flux` : optionnel. Choisit un autre angle/camera : `"Live Timing"`, `"Drivers Tracker"` ou `"F1 Live"` (voir `src/fluxMapping.js`). Omis : flux principal. Change aussi le nom du fichier final (ex : `... - Qualifications (Live Timing - F1TV).mkv`, ou `... - Live Timing (F1TV).mkv` pour la Course).

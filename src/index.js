@@ -17,12 +17,13 @@ function printUsage() {
   console.log(
     [
       'Usage :',
-      '  node src/index.js -saison <annee> [-manche <numero>|all] [-session "<nom de la session>"] [-audio <code>|no]',
+      '  node src/index.js -saison <annee> [-manche <numero>|<numero>+|all] [-session "<nom de la session>"] [-audio <code>|no]',
       '',
       'Exemples :',
       '  node src/index.js -saison 2026 -manche 11 -session "Essais Libres 1"   (telecharge cette video, toutes les pistes audio)',
       '  node src/index.js -saison 2026 -manche 11                              (liste les sessions dispo pour la manche 11, sans telecharger)',
       '  node src/index.js -saison 2026 -manche all -session "Course"           (telecharge la course de chaque manche de la saison)',
+      '  node src/index.js -saison 2026 -manche 9+ -session "Course"            (telecharge la course de la manche 9 a la derniere de la saison)',
       '  node src/index.js -saison 2026                                        (liste les sessions dispo pour toute la saison, sans telecharger)',
       '  node src/index.js -saison 2026 -manche 11 -session "Course" -audio en  (uniquement la piste audio anglaise)',
       '  node src/index.js -saison 2026 -manche 11 -session "Course" -audio no  (video seule, sans aucune piste audio)',
@@ -52,16 +53,33 @@ function parseCliArgs(argv) {
 }
 
 /**
- * Determine la liste des manches a traiter : une seule manche, ou toutes
- * celles de la saison si -manche est absent ou vaut "all".
+ * Determine la liste des manches a traiter : une seule manche, une manche et
+ * toutes les suivantes (syntaxe "9+"), ou toutes celles de la saison si
+ * -manche est absent ou vaut "all".
  */
 async function resolveManches(pool, saison, args) {
-  if (!args.manche || String(args.manche).trim().toLowerCase() === 'all') {
+  const raw = args.manche ? String(args.manche).trim() : '';
+
+  if (!raw || raw.toLowerCase() === 'all') {
     return getManches(pool, saison);
   }
-  const manche = Number(args.manche);
+
+  if (raw.endsWith('+')) {
+    const debut = Number(raw.slice(0, -1));
+    if (!Number.isInteger(debut)) {
+      throw new UserError('Le parametre -manche doit etre un nombre entier, eventuellement suivi de "+" (ex : "9+"), ou "all".');
+    }
+    const toutesLesManches = await getManches(pool, saison);
+    const manches = toutesLesManches.filter((m) => m >= debut);
+    if (manches.length === 0) {
+      throw new UserError(`Aucune manche >= ${debut} trouvee pour la saison ${saison}.`);
+    }
+    return manches;
+  }
+
+  const manche = Number(raw);
   if (!Number.isInteger(manche)) {
-    throw new UserError('Le parametre -manche doit etre un nombre entier ou "all".');
+    throw new UserError('Le parametre -manche doit etre un nombre entier, eventuellement suivi de "+" (ex : "9+"), ou "all".');
   }
   return [manche];
 }

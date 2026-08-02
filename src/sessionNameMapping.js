@@ -24,6 +24,7 @@ export const SESSION_NAME_MAPPING = {
   "Qualis Sprint": 'Qualifications Sprint',
   "Qualifs Sprint - Les Meilleurs Moments": 'Résumé Qualifications Sprint',
   "F1 Sprint": 'Course Sprint',
+  "Sprint": 'Course Sprint',
   "Sprint - Les Meilleurs Moments": 'Résumé Course Sprint',
   "La Course en 30min": "Résumé",
   "Conférence de Presse FIA d'Après Course": "Conférence de Presse",
