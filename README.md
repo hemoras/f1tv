@@ -82,6 +82,8 @@ Le fichier genere suit la convention :
 
 Les noms de session bruts renvoyes par F1TV sont normalises via une table de correspondance (`src/sessionNameMapping.js`), par exemple `REPLAY` -> `Course`, `HIGHLIGHTS` -> `Résumé`, `Emission d'Avant-Course` -> `Pre-Race`. Toute valeur absente de cette table est conservee telle quelle.
 
+Si plusieurs contenus F1TV partagent le meme nom de session (ex : certaines conferences de presse), le script essaie chacun automatiquement jusqu'a en trouver un accessible avec l'abonnement de l'utilisateur.
+
 ## Limites connues
 
 - La table `f1tv_saison` doit etre renseignee manuellement (pas de recherche automatique du `f1tv_id`).

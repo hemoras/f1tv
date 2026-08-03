@@ -16,7 +16,7 @@ const DEFAULT_HEADERS = {
 const DEVICE_INFO_HEADER =
   'device=web;screen=browser;os=windows;browser=chrome;browserVersion=150;osVersion=11;appVersion=52.0.6;playerVersion=8.212.0;p=false;tms=1';
 
-async function callF1tvApi(pathAndQuery, cookieHeader, extraHeaders = {}) {
+async function callF1tvApi(pathAndQuery, cookieHeader, extraHeaders = {}, context = null) {
   const url = `${BASE_URL}${pathAndQuery}`;
   let response;
   try {
@@ -28,12 +28,21 @@ async function callF1tvApi(pathAndQuery, cookieHeader, extraHeaders = {}) {
       },
     });
   } catch (err) {
-    throw new UserError(`Impossible de contacter F1TV (${err.message}). Verifie ta connexion internet.`);
+    // err.message vaut souvent juste "fetch failed" (message generique d'undici) ;
+    // la vraie cause (DNS, timeout, TLS, en-tete invalide...) est dans err.cause.
+    const detail = err.cause?.message ? ` - ${err.cause.message}` : '';
+    throw new UserError(`Impossible de contacter F1TV (${err.message}${detail}). Verifie ta connexion internet.`);
   }
 
   if (response.status === 401 || response.status === 403) {
+    // Sur l'appel CONTENT/PLAY, un 401/403 alors que le cookie fonctionne pour
+    // d'autres contenus signifie souvent que ce contenu precis n'est pas
+    // accessible (restriction d'abonnement/region) plutot qu'un cookie perime.
+    const contextSuffix = context ? ` (${context})` : '';
     throw new UserError(
-      "Acces refuse par F1TV (cookie invalide ou expire). Merci de regenerer le fichier de cookies en te reconnectant sur f1tv.formula1.com."
+      `Acces refuse par F1TV${contextSuffix} (HTTP ${response.status}). Soit le cookie est invalide/expire ` +
+        '(regenere le fichier de cookies en te reconnectant sur f1tv.formula1.com), soit ce contenu precis ' +
+        "n'est pas accessible avec ton abonnement (verifie qu'il est bien lisible depuis le site f1tv.formula1.com)."
     );
   }
   if (!response.ok) {
@@ -202,15 +211,21 @@ export async function findGpPageId(cookieHeader, f1tvSaisonId, manche) {
 }
 
 /**
- * Recupere le contentId de la session recherchee sur la page du Grand Prix
- * (metadata.titleBrief, passe par mapSessionName(), + metadata.emfAttributes.Series
+ * Recupere le ou les contentId de la session recherchee sur la page du Grand
+ * Prix (metadata.titleBrief, passe par mapSessionName(), + metadata.emfAttributes.Series
  * === "FORMULA 1", et MeetingKey correspondant a la manche demandee si connu).
- * S'il y a plusieurs resultats, seul le premier est conserve.
+ *
+ * Renvoie un tableau (dans l'ordre de la reponse F1TV) plutot qu'un seul
+ * contentId : il arrive que plusieurs entrees distinctes partagent le meme
+ * titre affiche (ex : conferences de presse) alors qu'une seule est
+ * effectivement lisible avec l'abonnement de l'utilisateur (les autres
+ * renvoient un 401/403 sur l'appel CONTENT/PLAY). L'appelant peut alors
+ * essayer chaque candidat jusqu'a en trouver un qui fonctionne.
  */
-export async function findSessionContentId(cookieHeader, gpPageId, meetingKey, session) {
+export async function findSessionContentIds(cookieHeader, gpPageId, meetingKey, session) {
   const data = await callF1tvApi(`/2.0/R/FRA/WEB_DASH/ALL/PAGE/${gpPageId}/ACCESS/5`, cookieHeader);
 
-  const match = findFirstMatch(data?.resultObj, (node) => {
+  const matches = findAllMatches(data?.resultObj, (node) => {
     const metadata = node.metadata;
     return (
       metadata &&
@@ -222,14 +237,20 @@ export async function findSessionContentId(cookieHeader, gpPageId, meetingKey, s
     );
   });
 
-  if (!match) {
+  if (matches.length === 0) {
     throw new UserError(
       `Impossible de trouver la session "${session}" pour ce Grand Prix. ` +
         `Verifie l'orthographe exacte de la session (ex : "Essais Libres 1", "Qualifications", "Course").`
     );
   }
 
-  return match.metadata.contentId;
+  const contentIds = [];
+  for (const node of matches) {
+    const id = node.metadata.contentId;
+    if (!contentIds.includes(id)) contentIds.push(id);
+  }
+
+  return contentIds;
 }
 
 /**
@@ -318,7 +339,8 @@ export async function getVideoUrl(cookieHeader, contentId, channelId = '') {
       Entitlementtoken: entitlementToken,
       Ascendontoken: ascendonToken,
       'X-F1-Device-Info': DEVICE_INFO_HEADER,
-    }
+    },
+    `contentId ${contentId}`
   );
 
   if (typeof data?.resultObj?.url === 'string') {

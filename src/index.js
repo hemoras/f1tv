@@ -7,7 +7,7 @@ import { logger } from './logger.js';
 import { UserError } from './errors.js';
 import { loadCookieHeader } from './cookies.js';
 import { createPool, getF1tvSaisonId, getGrandPrix, getManches } from './db.js';
-import { F1TV_HOST, findGpPageId, findSessionContentId, findAllSessions, getVideoUrl } from './f1tvApi.js';
+import { F1TV_HOST, findGpPageId, findSessionContentIds, findAllSessions, getVideoUrl } from './f1tvApi.js';
 import { getVideoAndAudioTracks, filterAudioTracks } from './hls.js';
 import { buildFileName } from './filename.js';
 import { downloadAndMux } from './download.js';
@@ -85,13 +85,41 @@ async function resolveManches(pool, saison, args) {
 }
 
 /**
+ * Recupere l'URL de lecture en essayant chaque contentId candidat dans
+ * l'ordre : il arrive que plusieurs entrees F1TV partagent le meme titre de
+ * session (ex : conferences de presse) alors qu'une seule est effectivement
+ * lisible avec l'abonnement de l'utilisateur (les autres renvoient un
+ * 401/403). On ne bascule sur le candidat suivant que dans ce cas precis ;
+ * toute autre erreur est remontee immediatement.
+ */
+async function getVideoUrlWithFallback(cookieHeader, contentIds, channelId, session) {
+  for (let i = 0; i < contentIds.length; i += 1) {
+    try {
+      return await getVideoUrl(cookieHeader, contentIds[i], channelId);
+    } catch (err) {
+      const isAccessError = err instanceof UserError && /Acces refuse par F1TV/.test(err.message);
+      const hasNextCandidate = i < contentIds.length - 1;
+      if (isAccessError && hasNextCandidate) {
+        logger.warn(
+          `Contenu inaccessible pour "${session}" (contentId ${contentIds[i]}), tentative avec un autre contenu correspondant...`
+        );
+        continue;
+      }
+      throw err;
+    }
+  }
+  // Inatteignable : contentIds n'est jamais vide (verifie en amont).
+  throw new UserError(`Impossible de recuperer la video pour "${session}".`);
+}
+
+/**
  * Telecharge une session precise (video + toutes les pistes audio) et
  * l'assemble en .mkv. Ne fait rien (et ne contacte pas F1TV) si le fichier
  * final existe deja : permet de rejouer une commande (ex : saison complete
  * sans -manche) sans retelecharger ce qui est deja present.
  */
 async function downloadSession({ config, cookieHeader, saison, manche, grandPrix, sessionInfo, audioArg, flux, channelId }) {
-  const { session, contentId } = sessionInfo;
+  const { session, contentIds } = sessionInfo;
 
   const fileName = buildFileName({ manche, grandPrix, saison, session, flux });
   const destinationPath = path.resolve(config.destDir, fileName);
@@ -106,7 +134,7 @@ async function downloadSession({ config, cookieHeader, saison, manche, grandPrix
       ? `Recuperation du lien de la video pour "${session}" (flux "${flux}")...`
       : `Recuperation du lien de la video pour "${session}"...`
   );
-  const masterPlaylistUrl = await getVideoUrl(cookieHeader, contentId, channelId);
+  const masterPlaylistUrl = await getVideoUrlWithFallback(cookieHeader, contentIds, channelId, session);
 
   logger.info('Analyse des pistes disponibles...');
   const { video, audioTracks: allAudioTracks } = await getVideoAndAudioTracks(masterPlaylistUrl);
@@ -206,7 +234,7 @@ async function main() {
           continue;
         }
 
-        let contentId;
+        let contentIds;
         if (directSessions) {
           const found = directSessions.find((s) => s.session === session);
           if (!found) {
@@ -215,9 +243,9 @@ async function main() {
               `Session "${session}" introuvable pour cette manche sur cette saison. Sessions disponibles : ${available}.`
             );
           }
-          contentId = found.contentId;
+          contentIds = [found.contentId];
         } else {
-          contentId = await findSessionContentId(cookieHeader, gpPageId, meetingKey, session);
+          contentIds = await findSessionContentIds(cookieHeader, gpPageId, meetingKey, session);
         }
 
         try {
@@ -227,7 +255,7 @@ async function main() {
             saison,
             manche,
             grandPrix,
-            sessionInfo: { session, contentId },
+            sessionInfo: { session, contentIds },
             audioArg: args.audio,
             flux,
             channelId,
