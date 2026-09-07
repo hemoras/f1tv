@@ -84,6 +84,21 @@ export function parseMasterPlaylist(text, baseUrl) {
  */
 export async function getVideoAndAudioTracks(masterPlaylistUrl) {
   const text = await fetchPlaylistText(masterPlaylistUrl);
+
+  // Les videos tres recentes (juste apres l'evenement) sont parfois encore
+  // servies par F1TV en DASH protege par DRM (Widevine) plutot qu'en HLS non
+  // protege : dans ce cas, impossible a telecharger avec ce script. F1TV
+  // republie generalement le meme contenu en HLS non protege quelques jours
+  // plus tard.
+  const looksLikeDrmProtectedDash = /<MPD[\s>]/i.test(text) && /ContentProtection/i.test(text);
+  if (looksLikeDrmProtectedDash) {
+    throw new UserError(
+      'Cette video est actuellement protegee par DRM (F1TV la sert en DASH/Widevine) et ne peut pas etre telechargee. ' +
+        "C'est generalement temporaire pour les videos tres recentes : F1TV la republie en general en HLS non protege " +
+        'quelques jours apres la diffusion. Reessaie plus tard.'
+    );
+  }
+
   const { videoVariants, audioTracks } = parseMasterPlaylist(text, masterPlaylistUrl);
 
   if (videoVariants.length === 0) {
